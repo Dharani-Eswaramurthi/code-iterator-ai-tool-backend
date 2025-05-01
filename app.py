@@ -45,7 +45,7 @@ generator = pipeline(
     "text-generation",
     model=model,
     tokenizer=tokenizer,
-    max_new_tokens=256,
+    max_new_tokens=2560,
     temperature=0.2,
     top_p=0.9,
     do_sample=True,
@@ -79,10 +79,11 @@ def build_instruction(request: SuggestRequest) -> str:
 INSTRUCTIONS:
 1. Analyze the provided code to verify it's actually {request.language}
 2. If not in {request.language}, first convert it properly
-3. Do the changes as per the request: {request.prompt}
-4. If the code is already done with the requested changes, do some improvements to the code and return.
-5. Focus on game performance optimization
-6. Use appropriate language conventions
+3. Understand the request ( {request.prompt} ) and decide what to do with the code.
+4. Do the changes as per the request, {request.prompt}
+5. If the code is already done with the requested changes, do some improvements to the code and return.
+6. Focus on game performance optimization
+7. Use appropriate language conventions
 
 
 Code to be modified: {request.code}
