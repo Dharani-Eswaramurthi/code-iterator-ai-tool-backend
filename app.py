@@ -14,11 +14,11 @@ from fastapi.middleware.cors import CORSMiddleware
 import time
 import logging
 
-# Configure logging
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Quantization configuration
+
 quant_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_use_double_quant=True,
@@ -26,10 +26,10 @@ quant_config = BitsAndBytesConfig(
     bnb_4bit_compute_dtype=torch.float16,
 )
 
-# Use smaller model variant for 2GB GPU
+
 MODEL_NAME = "deepseek-ai/deepseek-coder-1.3b-instruct"
 
-# Load model with correct architecture handling
+
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,
@@ -40,7 +40,7 @@ model = AutoModelForCausalLM.from_pretrained(
     low_cpu_mem_usage=True
 )
 
-# Remove manual device assignment for layers
+
 generator = pipeline(
     "text-generation",
     model=model,
