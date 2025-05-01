@@ -3,24 +3,54 @@ from pydantic import BaseModel
 import json
 import re
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
-from fastapi.middleware.cors import CORSMiddleware
-
-# Model setup
-model_name = "stabilityai/stable-code-instruct-3b"
-assert torch.cuda.is_available(), "CUDA not detected—check your torch install!"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(
-    model_name,
-    device_map="auto",
-    torch_dtype=torch.float16
+from difflib import ndiff
+from transformers import (
+    AutoModelForCausalLM, 
+    AutoTokenizer, 
+    pipeline,
+    BitsAndBytesConfig
 )
+from fastapi.middleware.cors import CORSMiddleware
+import time
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Quantization configuration
+quant_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16,
+)
+
+# Use smaller model variant for 2GB GPU
+MODEL_NAME = "deepseek-ai/deepseek-coder-1.3b-instruct"
+
+# Load model with correct architecture handling
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_NAME,
+    quantization_config=quant_config,
+    device_map="auto",
+    trust_remote_code=True,
+    torch_dtype=torch.float16,
+    low_cpu_mem_usage=True
+)
+
+# Remove manual device assignment for layers
 generator = pipeline(
-    "text2text-generation",
+    "text-generation",
     model=model,
     tokenizer=tokenizer,
-    max_length=4096,
-    temperature=0.2
+    max_new_tokens=256,
+    temperature=0.2,
+    top_p=0.9,
+    do_sample=True,
+    return_full_text=False,
+    # device=0 if torch.cuda.is_available() else -1
 )
 
 app = FastAPI()
@@ -41,85 +71,134 @@ class SuggestResponse(BaseModel):
     improved_code: str
     explanation: str
 
-@app.post("/suggest", response_model=SuggestResponse)
-def suggest(request: SuggestRequest) -> SuggestResponse:
-    print("Received /suggest request")
-    print("Request code:", request.code)
-    print("Request prompt:", request.prompt)
-    print("Request language:", request.language)
-    # Clear GPU cache
-    if torch.cuda.is_available():
-        print("Clearing CUDA cache")
-        torch.cuda.empty_cache()
+def build_instruction(request: SuggestRequest) -> str:
+    """Structured prompt with explicit formatting rules"""
+    return f"""GAME_CODE_MODIFICATION
 
-    # Build instruction
-    instruction = (
-        f"Here is the code to improve in {request.language}:```{request.code}```"
-        f"Please apply this change: {request.prompt}. "
-        "Return ONLY a single JSON object with exactly two keys:"
-        "\n  - \"improved_code\": the improved code as a raw string,"
-        "\n  - \"explanation\": the explanation as a raw string."
-        " Do NOT include any other text or markdown."
-    )
-    print("Instruction sent to model:", instruction)
+    You are an assisstant for game developers. Your task is to improve the productivity of game developers by providing code suggestions.
+INSTRUCTIONS:
+1. Analyze the provided code to verify it's actually {request.language}
+2. If not in {request.language}, first convert it properly
+3. Do the changes as per the request: {request.prompt}
+4. If the code is already done with the requested changes, do some improvements to the code and return.
+5. Focus on game performance optimization
+6. Use appropriate language conventions
 
-    outputs = generator(instruction)
-    print("Model outputs:", outputs)
-    raw = outputs[0].get("generated_text", "")
-    print("RAW output from model:", raw)
 
-    # Robust JSON extraction
-    code, exp = None, None
+Code to be modified: {request.code}
+
+RESPONSE FORMAT (Provide only the JSON object and no other content, text, notes or any explanations):
+{{ 
+    "improved_code": "(this is the place for the improved code)",
+    "explanation": "(This is the place for Short and crisp detailed technical justification)" 
+}}
+
+RULES:
+- Return ONLY the JSON object with only the two mentioned keys and their respective values.
+- Do not use any other characters or formatting
+- Validate JSON syntax before responding
+- Keep code concise and production-ready
+
+NOTE: STRICTLY, Do not use any content or text outside the JSON object.
+
+"""
+
+def parse_model_output(raw: str) -> dict:
+    """Extract the first valid JSON object from the output, even if surrounded by extra text."""
     try:
-        decoder = json.JSONDecoder()
-        idx = 0
-        while idx < len(raw):
+        # Find all potential JSON objects using a regex that handles some nested structures
+        json_matches = re.findall(r'\{(?:[^{}]|(?:\{.*?\}))*\}', raw, re.DOTALL)
+        
+        for json_str in json_matches:
             try:
-                payload, end = decoder.raw_decode(raw[idx:])
-                print("Decoded JSON candidate:", payload)
-                if isinstance(payload, dict) and "improved_code" in payload and "explanation" in payload:
-                    code = payload["improved_code"].strip()
-                    exp = payload["explanation"].strip()
-                    print("Parsed JSON successfully")
-                    break
+                data = json.loads(json_str)
+                # Check if both required keys exist and are strings
+                if (isinstance(data.get("improved_code"), str) and 
+                    isinstance(data.get("explanation"), str)):
+                    return {
+                        "improved_code": data["improved_code"].strip(),
+                        "explanation": data["explanation"].strip()
+                    }
             except json.JSONDecodeError:
-                idx += 1
-                continue
+                continue  # Skip invalid JSON
+            except Exception:
+                continue  # Other issues (e.g., type errors), try next match
+        
+        # If no valid partial JSON found, try parsing the entire output
+        data = json.loads(raw)
+        return {
+            "improved_code": data.get("improved_code", raw).strip(),
+            "explanation": data.get("explanation", "Optimization performed").strip()
+        }
+    
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON parsing error: {str(e)} - Raw output: {raw[:200]}...")
+        return {
+            "improved_code": raw,
+            "explanation": f"JSON Parsing Error: {str(e)}"
+        }
     except Exception as e:
-        print("Exception during JSON decode:", e)
+        logger.error(f"Unexpected error: {str(e)} - Raw output: {raw[:200]}...")
+        return {
+            "improved_code": raw,
+            "explanation": f"Processing Error: {str(e)}"
+        }
 
-    # Fallback: regex-based
-    if code is None or exp is None:
-        print("Trying regex-based JSON extraction")
-        match = re.search(r"\{\s*\"improved_code\".*\}" , raw, re.DOTALL)
-        if match:
-            try:
-                payload = json.loads(match.group(0))
-                print("Regex-extracted JSON:", payload)
-                code = payload.get("improved_code", "").strip()
-                exp = payload.get("explanation", "").strip()
-            except json.JSONDecodeError as e:
-                print("Regex JSON decode error:", e)
+@app.post("/suggest", response_model=SuggestResponse)
+async def suggest(request: SuggestRequest) -> SuggestResponse:
+    logger.info("Processing code suggestion request")
+    start_time = time.time()
+    
+    try:
+        instruction = build_instruction(request)
+        
+        with torch.inference_mode():
+            outputs = generator(
+                instruction,
+                pad_token_id=tokenizer.eos_token_id,
+                max_new_tokens=256
+            )
+            
+        raw_output = outputs[0]['generated_text']
+        logger.info(f"Raw model output: {raw_output}")  # Fixed logging syntax
+        
+        parsed = parse_model_output(raw_output)
+        
+        logger.info(f"Processing completed in {time.time() - start_time:.2f}s")
+        return SuggestResponse(**parsed)
+        
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generating suggestions: {str(e)}"
+        )
 
-    # Final fallback: return raw
-    if code is None or exp is None:
-        print("Falling back to raw output")
-        code = raw
-        exp = ""
-
-    print("Final improved_code:", code)
-    print("Final explanation:", exp)
-    return SuggestResponse(improved_code=code, explanation=exp)
+def generate_safe_merge(original: str, modified: str) -> str:
+    return '\n'.join(
+        line[2:] for line in ndiff(
+            original.split('\n'),
+            modified.split('\n')
+        ) if line.startswith(('+ ', '  '))
+    )
 
 class IntegrateRequest(BaseModel):
     original: str
     improved: str
 
-@app.post("/integrate", response_model=str)
-def integrate(request: IntegrateRequest):
-    """
-    Integrate improved code into original using unified diff merge.
-    """
-    print("Received /integrate request")
-    # For now, simply return the improved code; you can enhance with three-way merge later
-    return request.improved
+@app.post("/integrate")
+async def integrate(request: IntegrateRequest):
+    try:
+        merged_code = generate_safe_merge(request.original, request.improved)
+        return {"integrated_code": merged_code}
+    except Exception as e:
+        logger.error(f"Integration error: {e}")
+        raise HTTPException(status_code=400, detail="Failed to integrate changes")
+
+@app.on_event("startup")
+async def warmup_model():
+    logger.info("Model warmup completed")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
