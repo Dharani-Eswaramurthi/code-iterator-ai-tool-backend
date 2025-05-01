@@ -1,0 +1,9 @@
+fastapi>=0.95.0          # high-performance ASGI API framework :contentReference[oaicite:0]{index=0}
+uvicorn[standard]>=0.22.0  # ASGI server with optional C-extensions for speed :contentReference[oaicite:1]{index=1}
+pydantic>=2.11.0         # data validation and settings via Python type hints :contentReference[oaicite:2]{index=2}
+transformers>=4.44.0     # Hugging Face Transformers library & pipeline API :contentReference[oaicite:3]{index=3}
+torch>=2.0.0             # PyTorch for model execution (CPU/GPU) :contentReference[oaicite:4]{index=4}
+accelerate>=1.6.0        # HF Accelerate for efficient device & precision management :contentReference[oaicite:5]{index=5}
+huggingface-hub>=0.30.0  # HF Hub client for model download & caching :contentReference[oaicite:6]{index=6}
+tokenizers>=0.13.0       # fast Rust-backed tokenization (dependency of Transformers) :contentReference[oaicite:7]{index=7}
+sentencepiece>=0.2.0     # subword tokenizer needed by many HF models :contentReference[oaicite:8]{index=8}

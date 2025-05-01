@@ -1,0 +1,6 @@
+# Give me the .gitignore file with venv as virtual environment
+
+# Python virtual environment
+venv/
+# Ignore Python cache files
+__pycache__/
